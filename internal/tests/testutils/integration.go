@@ -224,6 +224,44 @@ func (r *Runner) parseResults(output []byte, err error) ([]string, error) {
 	return parts, nil
 }
 
+// Result is one run of the nuclei binary: its output and exit status.
+type Result struct {
+	Output   string
+	ExitCode int
+}
+
+// RunWithStatus runs nuclei with the given arguments and returns its combined
+// output and exit code. Unlike ArgsResults it does not treat a non-zero exit as
+// an error, which is what the exit-status cases assert on.
+func (r *Runner) RunWithStatus(debug bool, args ...string) (Result, error) {
+	builtArgs := r.buildArgs(args, r.InteractionsPollDuration)
+	var exitCode int
+	data, err := r.runCommand(true, "", func(cmd *exec.Cmd) {
+		cmd.Args = append(cmd.Args[:1], builtArgs...)
+		cmd.Env = r.buildEnv(nil)
+		if r.DisableAutoUpdate {
+			cmd.Args = append(cmd.Args, "-duc")
+		}
+		if debug {
+			cmd.Args = append(cmd.Args, "-debug")
+			cmd.Stderr = os.Stderr
+			fmt.Println(cmd.String())
+		} else {
+			cmd.Args = append(cmd.Args, "-silent")
+		}
+	})
+	if exitErr := (*exec.ExitError)(nil); errors.As(err, &exitErr) {
+		exitCode = exitErr.ExitCode()
+		// the process ran and reported through its status; output is still
+		// what the caller wants
+		err = nil
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Output: string(data), ExitCode: exitCode}, nil
+}
+
 func (r *Runner) TemplateResults(template, url string, debug bool, extra ...string) ([]string, error) {
 	args := []string{"-t", template, "-target", url}
 	args = append(args, extra...)
@@ -383,6 +421,11 @@ func RunNucleiAndGetResults(isTemplate bool, template, url string, debug bool, e
 
 func RunNucleiBareArgsAndGetResults(debug bool, env []string, extra ...string) ([]string, error) {
 	return defaultRunner.BareResults(debug, env, extra...)
+}
+
+// RunNucleiWithStatus runs nuclei and returns its output and exit code.
+func RunNucleiWithStatus(debug bool, args ...string) (Result, error) {
+	return defaultRunner.RunWithStatus(debug, args...)
 }
 
 // RunNucleiWithArgsAndGetResults returns result,and runtime errors.

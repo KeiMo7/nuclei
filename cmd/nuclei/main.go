@@ -29,8 +29,10 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/internal/configuration"
 	"github.com/projectdiscovery/nuclei/v3/internal/runner"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/config"
+	"github.com/projectdiscovery/nuclei/v3/pkg/exitcode"
 	"github.com/projectdiscovery/nuclei/v3/pkg/input/provider"
 	"github.com/projectdiscovery/nuclei/v3/pkg/installer"
+	isolationtypes "github.com/projectdiscovery/nuclei/v3/pkg/isolation/types"
 	"github.com/projectdiscovery/nuclei/v3/pkg/model/types/severity"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators/common/dsl"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/uncover"
@@ -252,6 +254,12 @@ func main() {
 	// on successful execution remove the resume file in case it exists
 	if fileutil.FileExists(resumeFileName) {
 		_ = os.Remove(resumeFileName)
+	}
+	// A scan that isolated units rendered findings for what ran, not for every
+	// target. Exit distinctly so a caller does not read it as a full success.
+	if status := nucleiRunner.IsolationStatus(); status != exitcode.OK {
+		options.Logger.Warning().Msgf("Scan ended with status %d: some units were isolated and their targets need a manual rescan", int(status))
+		exitcode.Exit(status)
 	}
 }
 
@@ -550,6 +558,17 @@ on extensive configurability, massive extensibility and ease of use.`)
 		flagSet.IntVarP(&options.MetricsPort, "metrics-port", "mp", 9092, "port to expose nuclei metrics on"),
 		flagSet.BoolVarP(&options.HTTPStats, "http-stats", "hps", false, "enable http status capturing (experimental)"),
 	)
+
+	isolationOptions := isolationtypes.DefaultOptions()
+	flagSet.CreateGroup("isolation", "Isolation",
+		flagSet.StringVar(&options.IsolationReportPath, "isolation-report", "", "write a readable list of isolated units here (default: next to the json output)"),
+		flagSet.IntVar(&isolationOptions.SignatureFailures, "isolation-signature-failures", isolationtypes.DefaultSignatureFailures, "isolate a template for the rest of the scan after it fails on this many targets"),
+		flagSet.BoolVar(&isolationOptions.DisableSignatureIsolation, "no-isolation-signature", false, "never isolate a template for failing on many targets; per-target isolation stays on"),
+		flagSet.IntVar(&isolationOptions.Retry, "isolation-retries", isolationtypes.DefaultRetry, "extra attempts for a crashed or timed-out unit before it is isolated on that target (0 isolates on the first fault)"),
+		flagSet.DurationVar(&isolationOptions.UnitTimeout, "isolation-timeout", 0, "deadline for one template run; 0 derives it from the protocol and -timeout"),
+		flagSet.DurationVar(&isolationOptions.CleanupTimeout, "isolation-cleanup-timeout", 0, "deadline for reclaiming an isolated unit's resources"),
+	)
+	options.IsolationOptions = isolationOptions
 
 	flagSet.CreateGroup("cloud", "Cloud",
 		flagSet.DynamicVar(&pdcpAuth, "auth", "true", "configure projectdiscovery cloud (pdcp) api key"),

@@ -16,6 +16,7 @@ import (
 	"github.com/projectdiscovery/gozero"
 	"github.com/projectdiscovery/gozero/sandbox"
 	gozerotypes "github.com/projectdiscovery/gozero/types"
+	"github.com/projectdiscovery/nuclei/v3/pkg/isolation"
 	"github.com/projectdiscovery/nuclei/v3/pkg/js/compiler"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators/extractors"
@@ -197,10 +198,15 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, dynamicVa
 	if err != nil {
 		return err
 	}
+	// Track the source before it runs: a unit isolated mid-execution must not
+	// leave the generated script behind for the next run to read. The unit's
+	// own cleanup releases it, so a normal run is not reported as leaking.
+	_, releaseSource := isolation.TrackResource(input.Context(), "code source", metaSrc.Cleanup)
 	defer func() {
 		if err := metaSrc.Cleanup(); err != nil {
 			gologger.Warning().Msgf("%s\n", err)
 		}
+		releaseSource()
 	}()
 
 	// inject all template context values as gozero env allvars

@@ -13,6 +13,7 @@ import (
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/config"
+	isolationtypes "github.com/projectdiscovery/nuclei/v3/pkg/isolation/types"
 	"github.com/projectdiscovery/nuclei/v3/pkg/model/types/severity"
 	"github.com/projectdiscovery/nuclei/v3/pkg/templates/types"
 	filepathutil "github.com/projectdiscovery/nuclei/v3/pkg/utils/filepath"
@@ -314,6 +315,12 @@ type Options struct {
 	TagList bool
 	// HangMonitor enables nuclei hang monitoring
 	HangMonitor bool
+	// IsolationOptions tunes execution-unit isolation. Isolation itself cannot
+	// be disabled: a crashing unit must never end the scan.
+	IsolationOptions *isolationtypes.Options
+	// IsolationReportPath is where the readable list of isolated units is
+	// written. Empty writes it next to the JSON output when there is one.
+	IsolationReportPath string
 	// Stdin specifies whether stdin input was given to the process
 	Stdin bool
 	// StopAtFirstMatch stops processing template at first full match (this may break chained requests)
@@ -682,6 +689,8 @@ func (options *Options) Copy() *Options {
 		MaxHostError:                   options.MaxHostError,
 		TrackError:                     options.TrackError,
 		NoHostErrors:                   options.NoHostErrors,
+		IsolationOptions:               options.IsolationOptions,
+		IsolationReportPath:            options.IsolationReportPath,
 		BulkSize:                       options.BulkSize,
 		TemplateThreads:                options.TemplateThreads,
 		templateThreadsProvider:        options.templateThreadsProvider,

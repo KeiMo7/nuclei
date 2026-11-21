@@ -197,7 +197,10 @@ func (e *Engine) clusterTemplates(templatesList []*templates.Template, noCluster
 func (e *Engine) expectedWork(templatesList, targetBound []*templates.Template, target provider.InputProvider, unscopedRequests int) (requests, tasks int64) {
 	scope := e.executerOpts.TargetScope
 	if scope == nil {
-		return int64(unscopedRequests), target.Count() * int64(len(targetBound))
+		requests = int64(unscopedRequests)
+		tasks = target.Count() * int64(len(targetBound))
+		e.expectedAffected(targetBound, nil, int(target.Count()))
+		return requests, tasks
 	}
 	targets := make(map[protocols.TemplateSelection]int64)
 	target.Iterate(func(value *contextargs.MetaInput) bool {
@@ -207,8 +210,22 @@ func (e *Engine) expectedWork(templatesList, targetBound []*templates.Template, 
 	for selection, count := range targets {
 		requests += count * int64(getSelectedRequestCount(templatesList, selection))
 		tasks += count * int64(getSelectedCount(targetBound, selection))
+		e.expectedAffected(targetBound, selection, int(count))
 	}
 	return requests, tasks
+}
+
+// expectedAffected records, per template, how many scheduled runs a quarantine
+// would swallow. The recorder reports it after the scan so an operator sees
+// the real impact rather than only the failures that triggered it.
+func (e *Engine) expectedAffected(targetBound []*templates.Template, selection protocols.TemplateSelection, targets int) {
+	recorder := e.isolationRecorder()
+	for _, template := range targetBound {
+		if selection != nil && !template.SelectedBy(selection) {
+			continue
+		}
+		recorder.AddScheduledTotal(template.ID, targets)
+	}
 }
 
 // getSelectedCount returns the number of templates selection selects; a nil

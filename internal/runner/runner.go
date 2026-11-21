@@ -48,6 +48,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/external/customtemplates"
 	fuzzStats "github.com/projectdiscovery/nuclei/v3/pkg/fuzz/stats"
 	"github.com/projectdiscovery/nuclei/v3/pkg/input"
+	"github.com/projectdiscovery/nuclei/v3/pkg/isolation"
 	parsers "github.com/projectdiscovery/nuclei/v3/pkg/loader/workflow"
 	llmclient "github.com/projectdiscovery/nuclei/v3/pkg/operators/common/llm"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
@@ -119,6 +120,11 @@ type Runner struct {
 	fuzzStats       *fuzzStats.Tracker
 	dastServer      *server.DASTServer
 	llmClient       llmclient.Client
+	// isolation records the units this scan crashed, hung or leaked, and the
+	// recorder is exposed after the run for the summary and exit status.
+	recorder    *isolation.Recorder
+	isolation   isolation.Summary
+	scanStarted time.Time
 }
 
 // New creates a new client for running the enumeration process.
@@ -348,6 +354,18 @@ func New(options *types.Options) (*Runner, error) {
 		runner.httpStats = outputstats.NewTracker()
 		runner.output = output.NewMultiWriter(runner.output, output.NewTrackerWriter(runner.httpStats))
 	}
+	// The CLI lets protocols write their findings directly, so isolation is
+	// enforced here too: a pair isolated mid-scan stops reaching the output.
+	// The recorder is shared with the engine, which decides what to isolate.
+	threshold := isolation.Threshold{
+		Retry:             isolationOptions(options).RetryCount(),
+		SignatureFailures: isolationOptions(options).SignatureThreshold(),
+	}
+	if isSignatureIsolationDisabled(options) {
+		threshold.SignatureFailures = 1 << 30
+	}
+	runner.recorder = isolation.NewRecorder(threshold)
+	runner.output = isolation.NewWriter(runner.output, runner.recorder)
 
 	if options.JSONL && options.EnableProgressBar {
 		options.StatsJSON = true
@@ -763,6 +781,7 @@ func (r *Runner) RunEnumeration() error {
 
 	executorEngine := core.New(r.options)
 	executorEngine.SetExecuterOptions(executorOpts)
+	r.installIsolation(executorEngine)
 
 	workflowLoader, err := parsers.NewLoader(executorOpts)
 	if err != nil {
@@ -995,6 +1014,8 @@ func (r *Runner) RunEnumeration() error {
 		matchCount := r.output.ResultCount()
 		r.Logger.Info().Msgf("Scan completed in %s. %d matches found.", shortDur(timeTaken), matchCount)
 	}
+
+	r.finishIsolation(executorEngine)
 
 	// check if a passive scan was requested but no target was provided
 	if r.options.OfflineHTTP && len(r.options.Targets) == 0 && r.options.TargetsFilePath == "" {

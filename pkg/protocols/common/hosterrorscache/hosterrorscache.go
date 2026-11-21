@@ -12,12 +12,23 @@ import (
 	"github.com/projectdiscovery/gcache"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/config"
+	"github.com/projectdiscovery/nuclei/v3/pkg/isolation"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/contextargs"
 	"github.com/projectdiscovery/nuclei/v3/pkg/types/nucleierr"
 	"github.com/projectdiscovery/utils/errkit"
 	stringsutil "github.com/projectdiscovery/utils/strings"
 	"golang.org/x/net/idna"
 )
+
+// UnitFailures records a crashed or hung execution unit as an error against
+// its host, so repeated failures also count toward -max-host-error. Isolation
+// decides per unit; this keeps the host-level skip in step with it.
+func UnitFailures(cache CacheInterface, protoType string, ctx *contextargs.Context, template string, err error) {
+	if cache == nil || ctx == nil || err == nil || !errors.Is(err, isolation.ErrUnitFault) {
+		return
+	}
+	cache.MarkFailedOrRemove(protoType, ctx, err)
+}
 
 // CacheInterface defines the signature of the hosterrorscache so that
 // users of Nuclei as embedded lib may implement their own cache

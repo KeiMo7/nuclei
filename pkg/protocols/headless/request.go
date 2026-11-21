@@ -14,6 +14,7 @@ import (
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/nuclei/v3/pkg/fuzz"
+	"github.com/projectdiscovery/nuclei/v3/pkg/isolation"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/contextargs"
@@ -174,11 +175,31 @@ func (request *Request) executeRequestWithPayloads(input *contextargs.Context, p
 		request.options.Progress.IncrementFailedRequestsBy(1)
 		return errors.Wrap(err, errCouldNotGetHtmlElement)
 	}
-	var page *engine.Page
+	// Track the instance before any step runs, so a unit that panics or hangs
+	// inside a step still has its browser context reclaimed by the isolation
+	// layer instead of growing the process with every target. releaseInstance
+	// records the unit's own close, so a normal run is not reported as leaking.
+	_, releaseInstance := isolation.TrackResource(input.Context(), "headless browser instance", instance.Close)
+	var (
+		page        *engine.Page
+		releasePage = func() {}
+	)
+	trackPage := func(created *engine.Page) {
+		if created == nil {
+			return
+		}
+		page = created
+		_, releasePage = isolation.TrackResource(input.Context(), "headless page", func() error {
+			created.Close()
+			return nil
+		})
+	}
 	defer func() {
 		if closeErr := instance.CloseWithPage(page); closeErr != nil {
 			gologger.Warning().Msgf("Could not close headless browser instance: %s", closeErr)
 		}
+		releasePage()
+		releaseInstance()
 	}()
 	instance.SetInteractsh(request.options.Interactsh)
 
@@ -191,6 +212,7 @@ func (request *Request) executeRequestWithPayloads(input *contextargs.Context, p
 		return errors.Wrap(err, errCouldNotGetHtmlElement)
 	}
 	page = createdPage
+	trackPage(createdPage)
 
 	page.InteractshURLs = append(interactshURLs, page.InteractshURLs...)
 

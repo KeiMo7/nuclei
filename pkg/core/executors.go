@@ -36,30 +36,25 @@ func (e *Engine) executeAllSelfContained(ctx context.Context, alltemplates []*te
 			if sharedBudget {
 				defer e.options.ReleaseTemplateThread()
 			}
-			defer e.tasksDone(1)
 			planned, skip := e.claimPlanned(template, &contextargs.MetaInput{})
 			if skip {
+				e.tasksDone(1)
 				return
 			}
 			finished := e.templateExecutionStarted(template, "")
 			defer func() { finished(ctx.Err()) }()
-			var err error
-			var match bool
-			ctx := scan.NewScanContext(ctx, contextargs.New(ctx))
-			if e.Callback != nil {
-				if results, err := template.Executer.ExecuteWithResults(ctx); err == nil {
-					for _, result := range results {
-						e.Callback(result)
-					}
-				}
-
-				match = true
-			} else {
-				match, err = template.Executer.Execute(ctx)
-			}
+			// the unit runs under isolation. The callback path writes what the
+			// template returns; the Execute path reports through the protocol's
+			// own callback and returns its match directly.
+			match, err := e.runUnitBody(ctx, template, &contextargs.MetaInput{}, func(runCtx context.Context) (bool, error) {
+				return e.executeSelfContained(runCtx, template)
+			})
+			// executeSelfContained does not count the task; a skipped unit is
+			// still a finished task
+			e.tasksDone(1)
 			if err != nil {
 				e.options.Logger.Warning().Msgf("[%s] Could not execute step (self-contained): %s\n", e.executerOpts.Colorizer.BrightBlue(template.ID), err)
-			} else if ctx.Context().Err() == nil {
+			} else if ctx.Err() == nil {
 				planned()
 			}
 			results.CompareAndSwap(false, match)
@@ -129,7 +124,7 @@ func (e *Engine) executeTemplateWithTargets(ctx context.Context, template *templ
 						return
 					}
 
-					match, err := e.executeTemplateOnInput(ctx, template, t.value)
+					match, err := e.runUnit(ctx, template, t.value)
 					if err != nil {
 						e.options.Logger.Warning().Msgf("[%s] Could not execute step on %s: %s\n", template.ID, t.value.Input, err)
 					}
@@ -285,7 +280,7 @@ func (e *Engine) executeTemplatesOnTarget(ctx context.Context, alltemplates []*t
 				defer e.options.ReleaseTemplateThread()
 			}
 
-			match, err := e.executeTemplateOnInput(ctx, template, value)
+			match, err := e.runUnit(ctx, template, value)
 			if err != nil {
 				e.options.Logger.Warning().Msgf("[%s] Could not execute step on %s: %s\n", template.ID, value.Input, err)
 			}
@@ -332,10 +327,12 @@ func (e *Engine) tasksDone(count int64) {
 	}
 }
 
-// executeTemplateOnInput performs template execution for a single input and returns match status and error
+// executeTemplateOnInput performs template execution for a single input and returns match status and error.
+// It is the unit of work isolation wraps: the unit's resource set travels on
+// the context, so a protocol that opens a page or a file registers its cleanup.
+// The task counter is not touched here: runUnit counts the pair once, even
+// when the unit is retried or skipped.
 func (e *Engine) executeTemplateOnInput(ctx context.Context, template *templates.Template, value *contextargs.MetaInput) (matched bool, err error) {
-	// a pair skipped as a repeat of its origin is done as well
-	defer e.tasksDone(1)
 	planned, skip := e.claimPlanned(template, value)
 	if skip {
 		return false, nil
@@ -373,8 +370,9 @@ func (e *Engine) executeTemplateOnInput(ctx context.Context, template *templates
 			if execErr != nil {
 				return false, execErr
 			}
+			sink := e.isolationRecorder().WrapResults(e.Callback)
 			for _, result := range results {
-				e.Callback(result)
+				sink(result)
 			}
 			if e.resultHook != nil {
 				e.resultHook(value, results)

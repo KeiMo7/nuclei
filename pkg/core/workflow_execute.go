@@ -5,8 +5,10 @@ import (
 	"net/http/cookiejar"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/projectdiscovery/gologger"
+	"github.com/projectdiscovery/nuclei/v3/pkg/isolation"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/contextargs"
 	"github.com/projectdiscovery/nuclei/v3/pkg/scan"
@@ -169,6 +171,8 @@ func (e *Engine) runWorkflowStep(template *workflows.WorkflowTemplate, ctx *scan
 							defer pending.Done()
 							release := slotRelease(swg)
 							defer release()
+							// a crash in the child must not take the process down
+							defer e.recoverWorkflowStep(subtemplate.Template)
 
 							// create a new context with the same input but with unset callbacks
 							// clone the Input so that other parallel executions won't overwrite the shared variables when subsequent templates are running
@@ -208,6 +212,8 @@ func (e *Engine) runWorkflowStep(template *workflows.WorkflowTemplate, ctx *scan
 				defer pending.Done()
 				release := slotRelease(swg)
 				defer release()
+				// a crash in the child must not take the process down
+				defer e.recoverWorkflowStep(template.Template)
 
 				// create a new context with the same input but with unset callbacks
 				subCtx := scan.NewScanContext(ctx.Context(), ctx.Input.Clone())
@@ -218,6 +224,28 @@ func (e *Engine) runWorkflowStep(template *workflows.WorkflowTemplate, ctx *scan
 		}
 	}
 	return mainErr
+}
+
+// recoverWorkflowStep contains a panic in a workflow child goroutine. The
+// parent's unit-level recover cannot see a panic raised on a child goroutine,
+// so each child recovers its own and records the decision against the child
+// template.
+func (e *Engine) recoverWorkflowStep(templatePath string) {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+	recorder := e.isolationRecorder()
+	recorder.Record(isolation.Decision{
+		Unit:     templatePath,
+		Template: templatePath,
+		Reason:   isolation.ReasonPanic,
+		Outcome:  isolation.Isolated,
+		At:       time.Now(),
+		Attempt:  1,
+		Err:      fmt.Sprintf("panic: %v", recovered),
+	})
+	gologger.Warning().Msgf("Workflow step %s crashed and was isolated: %v", templatePath, recovered)
 }
 
 func (e *Engine) syncWorkflowInputToTemplateCtx(executer *workflows.ProtocolExecuterPair, input *contextargs.Context) {

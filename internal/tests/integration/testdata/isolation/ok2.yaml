@@ -1,0 +1,15 @@
+id: isolation-ok-two
+
+info:
+  name: Isolation fixture - second normal unit
+  author: nuclei
+  severity: info
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/ok2"
+    matchers:
+      - type: word
+        words:
+          - "fixture-ok2"

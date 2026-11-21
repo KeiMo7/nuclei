@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/projectdiscovery/gologger"
+	"github.com/projectdiscovery/nuclei/v3/pkg/isolation"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/contextargs"
@@ -28,6 +29,9 @@ type TemplateExecutionEvent struct {
 	Target       string
 	State        TemplateExecutionState
 	ContextErr   error
+	// Isolation carries the isolation decision when the transition reports
+	// one; nil for a normal start/finish.
+	Isolation *isolation.Decision
 }
 
 // TemplateExecutionCallback observes template execution lifecycle transitions.
@@ -54,7 +58,11 @@ type Engine struct {
 	templateExecutionCallback TemplateExecutionCallback
 	planRun                   PlanRun
 	resultHook                ResultHook
-	Logger                    *gologger.Logger
+	// recorder keeps the isolation decisions of this scan. It is created on
+	// first use so a crash in a unit is always contained.
+	recorder      *isolation.Recorder
+	isolationOnce sync.Once
+	Logger        *gologger.Logger
 }
 
 // ResultHook observes the results of a template run on a target.

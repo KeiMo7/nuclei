@@ -16,6 +16,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/projectdiscovery/gologger"
+	"github.com/projectdiscovery/nuclei/v3/pkg/isolation"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators/matchers"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
@@ -157,14 +158,23 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, metadata,
 						request.options.Progress.IncrementFailedRequestsBy(1)
 						return
 					}
+					// Track the archive before processing it, so a unit isolated
+					// mid-extraction cannot leave the temporary file behind for
+					// the next run to read. The unit's own cleanup releases it.
+					tmpFileName := tmpFileOut.Name()
+					_, releaseTempFile := isolation.TrackResource(input.Context(), "archive temp file", func() error {
+						_ = tmpFileOut.Close()
+						return os.Remove(tmpFileName)
+					})
 					defer func() {
 						if err := tmpFileOut.Close(); err != nil {
 							panic(fmt.Errorf("could not close: %+v", err))
 						}
 
-						if err := os.Remove(tmpFileOut.Name()); err != nil {
+						if err := os.Remove(tmpFileName); err != nil {
 							panic(fmt.Errorf("could not remove: %+v", err))
 						}
+						releaseTempFile()
 					}()
 					_, err = io.Copy(tmpFileOut, reader)
 					if err != nil {

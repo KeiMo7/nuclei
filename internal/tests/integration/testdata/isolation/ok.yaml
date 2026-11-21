@@ -1,0 +1,15 @@
+id: isolation-ok
+
+info:
+  name: Isolation fixture - normal unit
+  author: nuclei
+  severity: info
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/ok"
+    matchers:
+      - type: word
+        words:
+          - "fixture-ok"

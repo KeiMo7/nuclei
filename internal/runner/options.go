@@ -21,6 +21,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/internal/server/proxy"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/config"
 	"github.com/projectdiscovery/nuclei/v3/pkg/installer"
+	inttypes "github.com/projectdiscovery/nuclei/v3/pkg/isolation/types"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/protocolinit"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/utils/vardump"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/headless/engine"
@@ -70,6 +71,9 @@ func readsTargetsFromStdin(options *types.Options, stdinIsPipe bool) bool {
 
 // ParseOptions parses the command line flags provided by a user
 func ParseOptions(options *types.Options) {
+	if options.IsolationOptions == nil {
+		options.IsolationOptions = inttypes.DefaultOptions()
+	}
 	options.Stdin = readsTargetsFromStdin(options, fileutil.HasStdin())
 
 	// Read the inputs from env variables that not passed by flag.
