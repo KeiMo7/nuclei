@@ -33,6 +33,11 @@ type Evaluation struct {
 	Values         map[string]interface{}
 	TemplateValues map[string]interface{}
 	InteractURLs   []string
+	// Snapshot is the immutable view of the scope this evaluation ran against.
+	Snapshot Snapshot
+	// Reused reports whether TemplateValues came from the evaluation cache
+	// because the scope's data digest matched the previous evaluation.
+	Reused bool
 }
 
 func (variables Variable) JSONSchema() *jsonschema.Schema {
@@ -83,13 +88,38 @@ func (variables *Variable) Evaluate(values map[string]interface{}) map[string]in
 
 // EvaluateScope returns evaluated variables and records which returned values
 // were produced from template variable text.
+//
+// When the incoming scope's digest matches the previous evaluation of the same
+// variable definitions, the cached TemplateValues are reused instead of
+// re-rendering; any digest change recomputes everything exactly once. The
+// passed scope is never modified.
 func (variables *Variable) EvaluateScope(scope *Scope) Evaluation {
+	snapshot := scope.Snapshot()
+	cacheKey := makeEvaluateCacheKey(variables, scope, snapshot)
+
+	if cached, ok := sharedEvaluateCache.get(cacheKey); ok {
+		result := make(map[string]interface{}, variables.Len())
+		templateValues := make(map[string]interface{}, variables.Len())
+		variables.ForEach(func(key string, _ interface{}) {
+			if existingValue, ok := scope.get(key); ok && existingValue.kind == ScopeValueData {
+				result[key] = existingValue.value
+				return
+			}
+			if value, ok := cached[key]; ok {
+				result[key] = value
+				templateValues[key] = value
+			}
+		})
+
+		return Evaluation{Values: result, TemplateValues: templateValues, Snapshot: snapshot, Reused: true}
+	}
+
 	result := make(map[string]interface{}, variables.Len())
 	templateValues := make(map[string]interface{}, variables.Len())
 	combined := scope.clone()
 
 	variables.ForEach(func(key string, value interface{}) {
-		if existingValue, ok := combined.get(key); ok && existingValue.kind == scopeValueData {
+		if existingValue, ok := combined.get(key); ok && existingValue.kind == ScopeValueData {
 			result[key] = existingValue.value
 			combined.AddDataValue(key, existingValue.value)
 
@@ -112,7 +142,9 @@ func (variables *Variable) EvaluateScope(scope *Scope) Evaluation {
 		combined.AddTemplateValue(key, evaluated)
 	})
 
-	return Evaluation{Values: result, TemplateValues: templateValues}
+	sharedEvaluateCache.add(cacheKey, templateValues)
+
+	return Evaluation{Values: result, TemplateValues: templateValues, Snapshot: snapshot}
 }
 
 // GetAll returns all variables as a map
@@ -142,7 +174,7 @@ func (variables *Variable) EvaluateWithInteractshScope(scope *Scope, interact re
 	var interactURLs []string
 
 	variables.ForEach(func(key string, value interface{}) {
-		if existingValue, ok := combined.get(key); ok && existingValue.kind == scopeValueData {
+		if existingValue, ok := combined.get(key); ok && existingValue.kind == ScopeValueData {
 			result[key] = existingValue.value
 			combined.AddDataValue(key, existingValue.value)
 
@@ -166,7 +198,7 @@ func (variables *Variable) EvaluateWithInteractshScope(scope *Scope, interact re
 		interactURLs = gotURLs
 	})
 
-	return Evaluation{Values: result, TemplateValues: templateValues, InteractURLs: interactURLs}
+	return Evaluation{Values: result, TemplateValues: templateValues, InteractURLs: interactURLs, Snapshot: scope.Snapshot()}
 }
 
 // evaluateVariableValue expression and returns final value.

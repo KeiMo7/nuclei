@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"reflect"
+	"sync"
 	"sync/atomic"
 
 	"github.com/projectdiscovery/fastdialer/fastdialer"
@@ -36,6 +37,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/hosterrorscache"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/hostratelimit"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/interactsh"
+	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/render"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/utils/excludematchers"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/variables"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/headless/engine"
@@ -180,6 +182,12 @@ type ExecutorOptions struct {
 	ClusterMappings *templateTypes.ClusterMappingsMap
 	// TargetScope narrows the templates run on each target (per-target profiles)
 	TargetScope TargetScope
+
+	// rateLimitGate lazily unifies per-host and global admission behind one
+	// gate, created on the first RateLimitTakeContext call.
+	rateLimitGateOnce sync.Once
+	rateLimitGate     *hostratelimit.Gate
+	rateLimitGateErr  error
 }
 
 // TargetScope resolves the template selection that applies to a target.
@@ -220,32 +228,45 @@ func (e *ExecutorOptions) RateLimitTake(host string) error {
 }
 
 // RateLimitTakeContext waits for admission or returns when ctx is canceled.
+// Admission is delegated to a gate created once per executor; a nil return
+// means the request is admitted, an error means it is not.
 func (e *ExecutorOptions) RateLimitTakeContext(ctx context.Context, host string) error {
-	if e.Options != nil && e.Options.PerHostRateLimit && host != "" {
-		limiter, err := hostratelimit.GetPerHostRateLimiter(e.Options, host)
-		if err != nil {
-			return err
-		}
-		if limiter != nil {
-			if err := limiter.Wait(ctx); err != nil {
-				return err
-			}
-			hostratelimit.RecordPerHostRateLimitRequest(e.Options, host)
-			return nil
-		}
+	gate, err := e.admissionGate()
+	if err != nil {
+		return err
 	}
-	// The code below can race and there isn't a great way to fix this without adding an idempotent
-	// function to the rate limiter implementation. For now, stick with whatever rate is already set.
-	/*
-		if e.RateLimiter.GetLimit() != uint(e.Options.RateLimit) {
-			e.RateLimiter.SetLimit(uint(e.Options.RateLimit))
-			e.RateLimiter.SetDuration(e.Options.RateLimitDuration)
-		}
-	*/
-	if e.RateLimiter != nil {
-		return e.RateLimiter.TakeContext(ctx)
+	return gate.Acquire(ctx, host)
+}
+
+// admissionGate returns the executor's admission gate, creating it on first
+// use from the current Options and RateLimiter.
+func (e *ExecutorOptions) admissionGate() (*hostratelimit.Gate, error) {
+	e.rateLimitGateOnce.Do(func() {
+		e.rateLimitGate, e.rateLimitGateErr = hostratelimit.NewGate(e.Options, e.RateLimiter)
+	})
+	return e.rateLimitGate, e.rateLimitGateErr
+}
+
+// RenderAndTake renders text with the given variable scope and then waits for
+// admission to the normalized host:port address contained in the rendered
+// text. A render failure returns the original text and the error without
+// consuming any rate-limit token; the same scope always renders to the same
+// address.
+func (e *ExecutorOptions) RenderAndTake(ctx context.Context, text string, scope *variables.Scope) (string, error) {
+	result, err := render.Render(render.Input{
+		Text:    text,
+		Values:  scope.Values(),
+		Options: e.GetOptions(),
+	})
+	if err != nil {
+		return text, err
 	}
-	return nil
+
+	if err := e.RateLimitTakeContext(ctx, hostratelimit.NormalizeHostPort(result.Text)); err != nil {
+		return result.Text, err
+	}
+
+	return result.Text, nil
 }
 
 // HostBackoffWait pauses for the delay address has earned with HostBackoff.
@@ -735,6 +756,12 @@ func (e *ExecutorOptions) ApplyNewEngineOptions(n *ExecutorOptions) {
 	e.Logger = n.Logger
 	e.CustomFastdialer = n.CustomFastdialer
 	e.ClusterMappings = n.ClusterMappings.Copy()
+
+	// The admission gate caches Options and RateLimiter, so drop it and let
+	// the next RateLimitTakeContext rebuild it from the new engine options.
+	e.rateLimitGateOnce = sync.Once{}
+	e.rateLimitGate = nil
+	e.rateLimitGateErr = nil
 }
 
 // GetOptions returns scan options, or nil for an unbound executor.
